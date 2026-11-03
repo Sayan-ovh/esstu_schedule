@@ -1,0 +1,90 @@
+name: update
+
+on:
+  schedule:
+    - cron: "17 18,22,1,4,7,10,14 * * *"
+    - cron: "40 20 * * 0"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "schedule - расписание, teachers - преподаватели, publish - только выложить сайт"
+        type: choice
+        options: [schedule, teachers, publish]
+        default: schedule
+      rebase:
+        description: "Без меток «изменилось»"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [publish]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      MODE: ${{ github.event_name == 'repository_dispatch' && 'publish' || github.event.schedule == '40 20 * * 0' && 'teachers' || inputs.mode || 'schedule' }}
+      REBASE: ${{ inputs.rebase && '--rebase' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Sayan-ovh/schedule-src
+          token: ${{ secrets.SRC_TOKEN }}
+          path: src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -r src/scraper/requirements.txt
+      - name: Run
+        working-directory: src
+        run: |
+          set +e
+          case "$MODE" in
+            schedule) python -u scraper/scrape.py $REBASE ;;
+            teachers) python -u scraper/teachers.py ;;
+            publish)  python -u scraper/scrape.py --build-only $REBASE ;;
+          esac > ../run.log 2>&1
+          code=$?
+          grep -E "^(Готово|Преподаватели:|Расписание по датам|Не удалось|ОШИБКА|Разобрано|8 ошибок|Сотрудников|Фото:)" ../run.log
+          if [ $code -ne 0 ]; then tail -n 1 ../run.log; fi
+          exit $code
+      - name: Save data
+        if: always()
+        working-directory: src
+        run: |
+          git config user.name "schedule-bot"
+          git config user.email "schedule-bot@users.noreply.github.com"
+          git add -A data
+          if ! git diff --cached --quiet; then
+            git commit -q -m "Update data"
+            git pull -q --rebase -X theirs origin main
+            git push -q
+          fi
+      - run: sh scraper/publish.sh ../_site
+        working-directory: src
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+      - name: Keepalive
+        run: |
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 3900000 ]; then
+            git config user.name "schedule-bot"
+            git config user.email "schedule-bot@users.noreply.github.com"
+            git commit --allow-empty -m "keepalive"
+            git push
+          fi
